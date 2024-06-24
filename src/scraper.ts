@@ -1,68 +1,77 @@
 import puppeteer from 'puppeteer-extra';
-import { Page } from 'puppeteer';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import fs from 'fs';
-import path from 'path';
+import { Page, Browser } from 'puppeteer';
 
 puppeteer.use(StealthPlugin());
-
 interface ScrapeResult {
-    tableData?: Object[];
+    tableData?: object[];
     message?: string;
     screenshots?: string[];
 }
 
-interface Cache {
-    [key: string]: {
-        status: number;
-        headers: Record<string, string>;
-        body: string; // Buffer converted to a base64 string for JSON compatibility
-    };
+async function initializeBrowser(): Promise<Browser> {
+    const browser = await puppeteer.launch({
+        headless: true,
+        userDataDir: './tmp/user-data-dir',
+        args: ['--start-maximized', '--no-sandbox'],
+    });
+    return browser;
 }
 
-const cacheFilePath = path.resolve(__dirname, 'cache.json');
-let cache: Cache = {};
+const cache: Record<string, any> = {};
 
-function loadCache() {
-    if (fs.existsSync(cacheFilePath)) {
-        const cacheData = fs.readFileSync(cacheFilePath, 'utf-8');
-        cache = JSON.parse(cacheData);
-    }
+async function interceptRequests(page: Page) {
+    await page.setRequestInterception(true);
+
+    page.on('request', async (request) => {
+        const url = request.url();
+        if (cache[url] && cache[url].expires > Date.now()) {
+            await request.respond(cache[url]);
+            return;
+        }
+        request.continue();
+    });
+
+    page.on('response', async (response) => {
+        const url = response.url();
+        const headers = response.headers();
+        const cacheControl = headers['cache-control'] || '';
+        const maxAgeMatch = cacheControl.match(/max-age=(\d+)/);
+        const maxAge = maxAgeMatch && maxAgeMatch.length > 1 ? parseInt(maxAgeMatch[1], 10) : 0;
+        if (maxAge) {
+            if (cache[url] && cache[url].expires > Date.now()) return;
+
+            let buffer;
+            try {
+                buffer = await response.buffer();
+            } catch (error) {
+                return;
+            }
+
+            cache[url] = {
+                status: response.status(),
+                headers: response.headers(),
+                body: buffer,
+                expires: Date.now() + (maxAge * 1000),
+            };
+        }
+    });
 }
-
-function saveCache() {
-    fs.writeFileSync(cacheFilePath, JSON.stringify(cache, null, 2));
-}
-
-loadCache();
 
 async function hoverAndClick(page: Page, hoverSelector: string, clickSelector: string) {
-    await new Promise(resolve => setTimeout(resolve, 1000));
     await page.hover(hoverSelector);
     await new Promise(resolve => setTimeout(resolve, 1000));
-    await page.click(clickSelector);
+
+    await page.evaluate((clickSelector: any) => {
+        document.querySelector(clickSelector).click();
+    }, clickSelector);
+
     await page.waitForSelector('.page-content');
     await new Promise(resolve => setTimeout(resolve, 500));
 }
 
-async function waitForSelectorWithRetry(page: Page, selector: string, retries: number = 3, timeout: number = 30000) {
-    for (let i = 0; i < retries; i++) {
-        try {
-            await page.waitForSelector(selector, { timeout });
-            return;
-        } catch (error) {
-            if (i === retries - 1) throw error;
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-    }
-}
 
-async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeResult> {
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: ['--start-maximized']
-    });
-
+async function scrapeCompanyData(browser: Browser, companyNameOrNumber: string): Promise<ScrapeResult> {
     const context = await browser.createBrowserContext();
     const page = await context.newPage();
 
@@ -74,41 +83,13 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
 
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
 
-    await page.setRequestInterception(true);
-    page.on('request', (request) => {
-        const url = request.url();
-        if (cache[url]) {
-            request.respond({
-                status: cache[url].status,
-                headers: cache[url].headers,
-                body: Buffer.from(cache[url].body, 'base64')
-            });
-        } else {
-            request.continue();
-        }
-    });
-
-    page.on('response', async (response) => {
-        const request = response.request();
-        const url = request.url();
-        const resourceType = request.resourceType();
-        if (['stylesheet', 'image', 'script'].includes(resourceType)) {
-            const buffer = await response.buffer();
-            cache[url] = {
-                status: response.status(),
-                headers: response.headers(),
-                body: buffer.toString('base64')
-            };
-            saveCache();
-        }
-    });
-
     try {
-        await page.goto('https://datawarehouse.dbd.go.th/index', { waitUntil: 'networkidle2' });
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        await page.screenshot({path: 'warning.jpg'});
-        await page.click('#btnWarning');
-        await page.click('.cwc-accept-button');
+        await interceptRequests(page);
+        await page.goto('https://datawarehouse.dbd.go.th/index', { waitUntil: 'networkidle2', timeout: 0 });
+        await page.evaluate(() => {
+            (document.querySelector('#btnWarning') as HTMLElement)?.click();
+            (document.querySelector('.cwc-accept-button') as HTMLElement)?.click();
+        });
         await page.waitForSelector('#key-word');
         await page.type('#key-word', companyNameOrNumber);
         await new Promise(resolve => setTimeout(resolve, 500));
@@ -122,19 +103,11 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
             await hoverAndClick(page, '#menu2', 'a[href="#tab21"]');
             const summaryPageElement = await page.$('.page-content');
             const summaryInfo: string = await summaryPageElement?.screenshot({ encoding: 'base64' }) || "";
-            await page.evaluate(() => {
-                window.scrollTo(0, 0);
-            });
-            summaryPageElement?.click();
             screenshots.push(summaryInfo);
 
             await hoverAndClick(page, '#menu2', 'a[href="#tab22"]');
             const statementPageElement = await page.$('.page-content');
             const statementInfo: string = await statementPageElement?.screenshot({ encoding: 'base64' }) || "";
-            await page.evaluate(() => {
-                window.scrollTo(0, 0);
-            });
-            statementPageElement?.click();
             screenshots.push(statementInfo);
 
             await hoverAndClick(page, '#menu2', 'a[href="#tab23"]');
@@ -146,20 +119,13 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
                 screenshots
             };
         } else {
-            const tableData: Object[] = [];
-            let foundData = false;
+            const tableData: object[] = [];
 
             while (true) {
-                try {
-                    await waitForSelectorWithRetry(page, '#fixTable tr td', 3, 60000);
-                } catch (error) {
-                    break;
-                }
-
-                const data = await page.$$eval('#fixTable tr:not(:first-child)', rows => {
-                    return Array.from(rows, row => {
+                const data = await page.$$eval('#fixTable tr:not(:first-child)', (rows: any) => {
+                    return Array.from(rows, (row: any) => {
                         const cells = row.querySelectorAll('td');
-                        const dataArray = Array.from(cells, cell => cell.innerText.trim());
+                        const dataArray = Array.from(cells, (cell: any) => cell.innerText.trim());
                         const dataObject = {
                             ID: dataArray[1],
                             Number: dataArray[2],
@@ -179,13 +145,10 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
                     });
                 });
 
-                if (data.length > 0) {
-                    tableData.push(...data);
-                    foundData = true;
-                }
+                tableData.push(...data);
 
                 const nextPageButton = await page.$('#next');
-                const isNextPageButtonHidden = nextPageButton && await page.evaluate(button => {
+                const isNextPageButtonHidden = nextPageButton && await page.evaluate((button: any) => {
                     return button.classList.contains('hide');
                 }, nextPageButton);
 
@@ -194,26 +157,24 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
                 }
 
                 await Promise.all([
-                    nextPageButton.click(),
+                    page.evaluate(() => {
+                        (document.querySelector('#next') as HTMLElement)?.click();
+                    }),
                     new Promise(resolve => setTimeout(resolve, 2000)),
-                    waitForSelectorWithRetry(page, '#fixTable tr td', 3, 60000)
+                    page.waitForSelector('#fixTable tr td', { visible: true })
                 ]);
             }
 
-            if (!foundData) {
-                result.message = "Not Found data";
-            } else {
-                result.tableData = tableData;
-            }
+            result.tableData = tableData;
         }
 
-        await browser.close();
+        await context.close();
         return result;
     } catch (error) {
-        console.log(error);
-        await browser.close();
+        console.error(error);
+        await context.close();
         throw error;
     }
 }
 
-export { scrapeCompanyData };
+export { scrapeCompanyData, initializeBrowser };
