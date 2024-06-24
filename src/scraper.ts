@@ -1,8 +1,5 @@
 import puppeteer from 'puppeteer-extra';
-import { Page, HTTPRequest, HTTPResponse, WaitForOptions } from 'puppeteer';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import fs from 'fs';
-import path from 'path';
 
 puppeteer.use(StealthPlugin());
 
@@ -10,75 +7,25 @@ interface ScrapeResult {
     tableData?: Object[];
     message?: string;
     screenshots?: string[];
-}
+  }
 
-const CACHE_DIR = path.resolve(__dirname, 'cache');
-
-if (!fs.existsSync(CACHE_DIR)) {
-    fs.mkdirSync(CACHE_DIR);
-}
-
-const EXCLUDED_DOMAINS = ['google.com', 'botnoi.ai'];
-
-async function setupRequestInterception(page: Page) {
-    await page.setRequestInterception(true);
-
-    page.on('request', (request: HTTPRequest) => {
-        const url = new URL(request.url());
-        const filePath = path.resolve(CACHE_DIR, url.pathname.replace(/\//g, '_'));
-
-        if (
-            ['image'].includes(request.resourceType()) || 
-            url.pathname.includes('background') || 
-            EXCLUDED_DOMAINS.some(domain => url.hostname.includes(domain))
-        ) {
-            request.abort();
-        } else if (fs.existsSync(filePath)) {
-            const buffer = fs.readFileSync(filePath);
-            request.respond({
-                status: 200,
-                body: buffer
-            });
-        } else {
-            request.continue();
-        }
-    });
-
-    page.on('response', async (response: HTTPResponse) => {
-        const url = new URL(response.url());
-        const filePath = path.resolve(CACHE_DIR, url.pathname.replace(/\//g, '_'));
-
-        if (
-            !fs.existsSync(filePath) && 
-            ['document', 'script'].includes(response.request().resourceType()) &&
-            !EXCLUDED_DOMAINS.some(domain => url.hostname.includes(domain))
-        ) {
-            try {
-                const buffer = await response.buffer();
-                if (buffer && buffer.length) {
-                    fs.writeFileSync(filePath, buffer);
-                }
-            } catch (error) {
-                console.error(`Failed to save response for ${response.url()}:`, error);
-            }
-        }
-    });
-}
-
-async function hoverAndClick(page: Page, hoverSelector: string, clickSelector: string) {
+async function hoverAndClick(page: any, hoverSelector: string, clickSelector: string) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
     await page.hover(hoverSelector);
+    await new Promise(resolve => setTimeout(resolve, 1000));
     await page.click(clickSelector);
-    await page.waitForSelector('.page-content');
+    await page.waitForSelector('.page-content')
+    await new Promise(resolve => setTimeout(resolve, 500));
 }
 
 async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeResult> {
     const browser = await puppeteer.launch({
-        headless: false,
+        headless: true,
         args: ['--start-maximized']
     });
 
-    const page = await browser.newPage();
-    await setupRequestInterception(page);
+    const context = await browser.createBrowserContext();
+    const page = await context.newPage();
 
     await page.setViewport({
         width: 1920,
@@ -89,44 +36,63 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
 
     try {
-        debugger
-        await retryGoto(page, 'https://datawarehouse.dbd.go.th/index', 3);
-        
-        // Remove unnecessary elements to speed up loading
-        await page.evaluate(() => {
-            document.querySelectorAll('img, .chat, #background, #logo, .icon').forEach(el => el.remove());
-        });
+        await page.goto('https://datawarehouse.dbd.go.th/index', { waitUntil: 'networkidle2' });
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
-        await page.click('#btnWarning');
-        await page.click('.cwc-accept-button');
-        await page.waitForSelector('#key-word');
+        const btnWarning = await page.$('#btnWarning');
+        if (btnWarning) {
+            await btnWarning.click();
+        }
+
+        const acceptButton = await page.$('.cwc-accept-button');
+        if (acceptButton) {
+            await acceptButton.click();
+        }
+        await page.waitForSelector('#key-word')
         await page.type('#key-word', companyNameOrNumber);
+        await new Promise(resolve => setTimeout(resolve, 500));
         await page.keyboard.press('Enter');
-        await retryWaitForNavigation(page, { waitUntil: 'networkidle2', timeout: 60000 });
-
+        await page.waitForNavigation({ waitUntil: 'networkidle2' });
         const currentURL = page.url();
         let result: ScrapeResult = {};
 
         if (currentURL.includes('profile')) {
             const screenshots: string[] = [];
             await hoverAndClick(page, '#menu2', 'a[href="#tab21"]');
-            screenshots.push(await takeScreenshot(page));
+            const summaryPageElement = await page.$('.page-content');
+            const summaryInfo: string = await summaryPageElement?.screenshot({ encoding: 'base64' }) || "";
+            await page.evaluate(() => {
+                window.scrollTo(0, 0);
+              });
+              summaryPageElement?.click()
+            screenshots.push(summaryInfo);
 
             await hoverAndClick(page, '#menu2', 'a[href="#tab22"]');
-            screenshots.push(await takeScreenshot(page));
+            const statementPageElement = await page.$('.page-content');
+            const statementInfo: string = await statementPageElement?.screenshot({ encoding: 'base64' }) || "";
+            await page.evaluate(() => {
+                window.scrollTo(0, 0);
+              });
+              statementPageElement?.click()
+            screenshots.push(statementInfo)
 
             await hoverAndClick(page, '#menu2', 'a[href="#tab23"]');
-            screenshots.push(await takeScreenshot(page));
+            const historyPageElement = await page.$('.page-content');
+            const historyInfo: string = await historyPageElement?.screenshot({ encoding: 'base64' }) || "";
+            screenshots.push(historyInfo)
 
-            result = { screenshots };
+            result = {
+                screenshots
+              };
         } else {
             const tableData: Object[] = [];
+
             while (true) {
                 const data = await page.$$eval('#fixTable tr:not(:first-child)', rows => {
                     return Array.from(rows, row => {
                         const cells = row.querySelectorAll('td');
                         const dataArray = Array.from(cells, cell => cell.innerText.trim());
-                        return {
+                        const dataObject = {
                             ID: dataArray[1],
                             Number: dataArray[2],
                             Name: dataArray[3],
@@ -140,7 +106,8 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
                             NetProfit: dataArray[11],
                             TotalAssets: dataArray[12],
                             ShareholderEquity: dataArray[13]
-                        };
+                        }
+                        return dataObject;
                     });
                 });
 
@@ -156,8 +123,9 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
                 }
 
                 await Promise.all([
-                    nextPageButton.click(),
-                    retryWaitForNavigation(page, { waitUntil: 'networkidle2', timeout: 60000 })
+                    await nextPageButton.click(),
+                    await new Promise(resolve => setTimeout(resolve, 2000)),
+                    await page.waitForSelector('#fixTable tr td', { visible: true })
                 ]);
             }
 
@@ -167,51 +135,10 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
         await browser.close();
         return result;
     } catch (error) {
-        console.error(error);
+        console.log(error);
         await browser.close();
         throw error;
     }
-}
-
-async function retryGoto(page: Page, url: string, retries: number): Promise<void> {
-    for (let attempt = 1; attempt <= retries; attempt++) {
-        try {
-            await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-            return;
-        } catch (error) {
-            if (attempt === retries) {
-                throw error;
-            }
-            if (error instanceof Error) {
-                console.warn(`Attempt ${attempt} failed: ${error.message}. Retrying...`);
-            } else {
-                console.warn(`Attempt ${attempt} failed: ${String(error)}. Retrying...`);
-            }
-        }
-    }
-}
-
-async function retryWaitForNavigation(page: Page, options: WaitForOptions): Promise<void> {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-            await page.waitForNavigation(options);
-            return;
-        } catch (error) {
-            if (attempt === 3) {
-                throw error;
-            }
-            if (error instanceof Error) {
-                console.warn(`Navigation attempt ${attempt} failed: ${error.message}. Retrying...`);
-            } else {
-                console.warn(`Navigation attempt ${attempt} failed: ${String(error)}. Retrying...`);
-            }
-        }
-    }
-}
-
-async function takeScreenshot(page: Page): Promise<string> {
-    const pageContent = await page.$('.page-content');
-    return await pageContent?.screenshot({ encoding: 'base64' }) || "";
 }
 
 export { scrapeCompanyData };
