@@ -1,5 +1,6 @@
 {
-    "watch": "**/*",
-    "ext": "ts, json",
+    "watch": ["src"],
+    "ignore": ["src/cache.json"],
+    "ext": "ts",
     "exec": "ts-node ./src"
   }
