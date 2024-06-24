@@ -1,8 +1,22 @@
 import express from 'express';
-import { scrapeCompanyData } from './scraper';
+import puppeteer from 'puppeteer-extra';
+import { Browser } from 'puppeteer';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { scrapeCompanyData, initializeBrowser } from './scraper';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+puppeteer.use(StealthPlugin());
+
+let browser: Browser;
+
+const startServer = async () => {
+  browser = await initializeBrowser();
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
+};
 
 app.use(express.json());
 
@@ -13,7 +27,7 @@ app.get('/api/search', async (req, res) => {
     }
   
     try {
-      const result = await scrapeCompanyData(from as string);
+      const result = await scrapeCompanyData(from as string, browser);
       return res.json(result);
     } catch (error) {
       if (error instanceof Error) {
@@ -23,6 +37,4 @@ app.get('/api/search', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+startServer();

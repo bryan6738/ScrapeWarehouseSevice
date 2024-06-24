@@ -1,15 +1,13 @@
 import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-
-puppeteer.use(StealthPlugin());
+import { Page, Browser } from 'puppeteer';
 
 interface ScrapeResult {
     tableData?: Object[];
     message?: string;
     screenshots?: string[];
-  }
+}
 
-async function hoverAndClick(page: any, hoverSelector: string, clickSelector: string) {
+async function hoverAndClick(page: Page, hoverSelector: string, clickSelector: string) {
     await new Promise(resolve => setTimeout(resolve, 1000));
     await page.hover(hoverSelector);
     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -18,14 +16,13 @@ async function hoverAndClick(page: any, hoverSelector: string, clickSelector: st
     await new Promise(resolve => setTimeout(resolve, 500));
 }
 
-async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeResult> {
+async function initializeBrowser(): Promise<Browser> {
     const browser = await puppeteer.launch({
-        headless: true,
+        headless: false,
         args: ['--start-maximized']
     });
 
-    const context = await browser.createBrowserContext();
-    const page = await context.newPage();
+    const page = await browser.newPage();
 
     await page.setViewport({
         width: 1920,
@@ -49,7 +46,37 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
             await acceptButton.click();
         }
         await page.waitForSelector('#key-word')
-        await page.type('#key-word', companyNameOrNumber);
+        await page.type('#key-word', "Initialize Browser");
+        await new Promise(resolve => setTimeout(resolve, 500));
+        await page.keyboard.press('Enter');
+        await page.waitForNavigation({ waitUntil: 'networkidle2' });
+
+        return browser;
+    } catch (error) {
+        // console.log(error);
+        await page.close();
+        throw error;
+    }
+}
+
+async function scrapeCompanyData(companyNameOrNumber: string, browser: Browser): Promise<ScrapeResult> {
+    const page = await browser.newPage();
+
+    await page.setViewport({
+        width: 1920,
+        height: 1000,
+        deviceScaleFactor: 1,
+    });
+
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+
+    try {
+        await page.goto('https://datawarehouse.dbd.go.th/searchJuristicInfo', { waitUntil: 'networkidle2' });
+        await page.waitForSelector('#textSearch')
+        await page.evaluate(() => {
+            (document.querySelector('#textSearch') as HTMLInputElement).value = '';
+        });
+        await page.type('#textSearch', companyNameOrNumber);
         await new Promise(resolve => setTimeout(resolve, 500));
         await page.keyboard.press('Enter');
         await page.waitForNavigation({ waitUntil: 'networkidle2' });
@@ -132,13 +159,13 @@ async function scrapeCompanyData(companyNameOrNumber: string): Promise<ScrapeRes
             result.tableData = tableData;
         }
 
-        await browser.close();
+        await page.close();
         return result;
     } catch (error) {
-        console.log(error);
-        await browser.close();
+        // console.log(error);
+        await page.close();
         throw error;
     }
 }
 
-export { scrapeCompanyData };
+export { scrapeCompanyData, initializeBrowser };
